@@ -33,7 +33,10 @@ H = $29  ; hex value parsing high
 XAML = $24 ; last opened location low 
 XAMH = $25 ; last opened location high
 MODE = $23  ; MODE
-YSAV = $22 ; last Y index we had 
+YSAV = $22 ; last Y index we had
+STL = $20 ; store address low 
+STH = $21 ; store address high
+ACIA_ERROR = $2A ; check this for serial errors 
 
 	.org $8000
 
@@ -64,7 +67,7 @@ init:
 	;ACIA init code
 	
 	sta acia_stat ; soft reset
-	lda #$0B ; 1011 interrupts disabled 
+	lda #$0B ; 1011 interrupts disabled and RTSB Low 
 	sta acia_comm
 
 	lda #$1F
@@ -202,6 +205,7 @@ setmode:
 
 	sta MODE 
 
+
 skip:
 	iny
 
@@ -213,9 +217,14 @@ next_token:
 	beq getline ; done restart 
 	cmp #"." ; block listing mode
 	beq setmode ;set mode
-	cmp #"R"
-	beq run ; run program from last location XAML
-
+	cmp #":" ; set STOR mode 
+	beq setmode 
+	cmp #"S" ; check for load from serial mode 
+	beq setmode
+	cmp #"R" ; check for run mode 
+	bne notrun ; run program from last location XAML
+	jmp run 
+notrun:
 	stx L ; x = 0 
 	stx H
 	sty YSAV ; save Y index for later 
@@ -223,7 +232,6 @@ next_token:
 nexthex:
 
 	lda BUFFER,Y ; get next ascii byte
-	jsr krnl_write_lcd_charac
 	eor #$30 ; 0-9 : $30-$39 
 	cmp #10 ; check if within range 0-9
 	bcc parse ;ok we are done
@@ -261,21 +269,36 @@ not_hex:
 	beq getline ; no restart 
 
 	lda MODE
-	cmp #"." ; multiple listing mode 
-	beq xamnext 
+	cmp #"." ; multiple listing mode
+	beq xamnext
+	cmp #"S" ; load from serial mode 
+	bne not_serial
+	jmp load_serial
+not_serial:
+	cmp #":" ; check if STOR mode
+	bne  notstormode
 
+stormode: ; ************* STORMODE 
+
+	lda L
+	sta (STL,X)
+	inc STL
+	bne next_token
+	inc STH
+hello:
+	jmp next_token
 	
 	; fall through to print address and data 
+notstormode:
 
 	ldx #2
 setadr:
 
 	lda L-1,X
-	;sta STL-1,X
+	sta STL-1,X
 	sta XAML-1,X
 	dex
 	bne setadr
-
 
 nxtprnt:
 	bne prdata ; used for branch after MOD8 to print new line 
@@ -304,8 +327,8 @@ xamnext:
 	lda XAML ; 
 	cmp L
 	lda XAMH
-	sbc H 
-	bcs next_token  ; we are not less , done ! , continue line parsing 
+	sbc H
+	bcs hello  ; we are not less , done ! , continue line parsing 
 
 	inc XAML ; increment index of address 
 	bne mod8 ; no carry from incrementing XAML
@@ -320,7 +343,61 @@ mod8:
 
 run : jmp (XAML) 
 
+; **********************************
+; load bytes from serial, place them at address XAMH;XAML and load (H;L) bytes
 
+load_serial:
+
+	ldx #0
+
+
+load_next_byte:
+	cpx L
+	bne not_done
+	cpX H
+	beq load_done
+not_done:
+	jsr krnl_rx_serial ; wait for byte
+	bit ACIA_ERROR ; check for errors 
+	bmi acia_error
+	sta (XAML,X) ; store
+
+	pha
+	lda XAMH
+	jsr krnl_print_hex
+	lda XAML
+	jsr krnl_print_hex
+	lda #":"
+	jsr krnl_send_chr_serial
+	pla
+	jsr krnl_print_hex
+	lda #" "
+	jsr krnl_send_chr_serial
+
+	; decrement counter 
+	dec L 
+	bpl dec_ok ; no borrow 
+	dec H 
+dec_ok:
+	; increment XAML
+	inc XAML 
+	bne load_next_byte; no carry 
+	inc XAMH
+	bne load_next_byte ; always taken 
+load_done:
+
+	jmp next_token ; goto to monitor 
+
+acia_error:
+
+	lda #(acia_error_message & 0xFF) ; lower byte first
+	sta serial_string_send_low
+	lda #(acia_error_message >> 8 ) ; higher byte first 
+	sta serial_string_send_high
+
+	jsr krnl_send_string_serial ; send error message over serial 
+
+	jmp next_token
 ;***********************************************************	
 ;*                                                         *
 ;*                KERNEL_FUNCTIONS                         *
@@ -345,6 +422,29 @@ krnl_print_hex: ; print the hex value that is in accumulator
 
 	jsr krnl_convert_nibble_hex
 	jsr krnl_send_chr_serial
+
+	pla
+
+	rts
+
+
+krnl_print_lcd_hex: ; print the hex value that is in accumulator
+
+	pha
+	pha
+
+	lsr 
+	lsr
+	lsr
+	lsr
+	
+	jsr krnl_convert_nibble_hex ; convert higher nibble first 
+	jsr krnl_write_lcd_charac
+
+	pla
+
+	jsr krnl_convert_nibble_hex
+	jsr krnl_write_lcd_charac
 
 	pla
 
@@ -394,16 +494,58 @@ krnl_send_chr_serial: ; expects input argument in accumulator
 
 	rts
 
-krnl_rx_serial: ; this routine waits for a byte to be received over serial 
+	;******************************************************
 
-    lda acia_stat ; just to clear some flags
+krnl_rx_serial: ; this routine waits for a byte to be received over serial
 
+	; set RTSB low 
+
+	lda #$0B
+	sta acia_comm
+	
+    lda acia_stat 
+
+	pha ; save acia_stat 
+
+	and #$04 ; test for overrun condition 
+	beq no_overrun
+
+	phx
+	ldx #$ff
+	stx ACIA_ERROR ; flag overrun error
+	plx
+
+	jmp restore
+
+no_overrun:
+
+	lda #0
+	sta ACIA_ERROR
+
+restore:
+
+	pla ; restore acia_stat
+	jmp first_entry
+
+recheck:
+
+	lda acia_stat
+
+first_entry: 
 	and #$08 ; check if character is there
-	beq krnl_rx_serial
+	beq recheck
 	
 	lda acia_data ; just clear the receiver for now
 
+	pha
+
+	lda #$0A  ; set RTSB high so we avoid getting overrun
+	sta acia_comm
+
+	pla
+
 	rts
+	;************************************************************************* 
 
 krnl_tx_byte_delay:
 
@@ -517,7 +659,10 @@ ram_ok_message: db "memory: 0x000-0x3FFF OK..." , $A , $D, $00
 ram_error_message : db "RAM TEST ERROR: could not R/W from RAM" , $A , $D , $00
 monitor_help_message : db "Augustiner Monitor Program:" , $A , $D , "{h}: to display this message"
 	db $A , $D , "{m}: display zero page memory" , $A , $D , $00
+acia_error_message: db "ACIA overrun!! exiting" , $A , $D , $00 
 
 	.org $fffc ; 6502 reset vector
 	.word $8000
 	.word $0000 ; no interrupt
+
+
