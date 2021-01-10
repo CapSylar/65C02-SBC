@@ -7,12 +7,11 @@ porta = $6001
 
 acia_data = $5000 ; data register
 acia_stat = $5001 ; status register ; on write we reset the ACIA
-acia_comm = $5002 ; command register 
-acia_ctrl = $5003 ; control register 
+acia_comm = $5002 ; command register
+acia_ctrl = $5003 ; control register
 
 	; PORTA 0-2 : E - R/WB - RS
 	; PORTB 0-7 : LCD data bus  in order 
-
 
  ; PAGE ZERO VARIABLES 
 
@@ -27,7 +26,8 @@ PROMPT = "$" ; prompt character
 
 ; Monitor  variables 
 
-BUFFER = $200 ; starts at $200 and spans till $27F ; 127 characters like the original wozmon
+line_buffer = $200 ; starts at $200 and spans till $27F ; 127 characters like the original wozmon
+serial_buffer = $300 ; from $300 to $3ff 
 L = $28 ; hex value parsing low 
 H = $29  ; hex value parsing high 
 XAML = $24 ; last opened location low 
@@ -36,7 +36,10 @@ MODE = $23  ; MODE
 YSAV = $22 ; last Y index we had
 STL = $20 ; store address low 
 STH = $21 ; store address high
-ACIA_ERROR = $2A ; check this for serial errors 
+ACIA_ERROR = $2A ; check this for serial errors
+ACIA_NUMBER = $2B
+q_front = $2C ; front of serial queue
+q_back = $2D ; back of serial queue
 
 	.org $8000
 
@@ -55,6 +58,13 @@ init:
 
 	; write things to zero page 
 
+	; set up the circular queue back and front variables for the serial buffer 
+	lda #0
+	sta q_back
+	sta q_front
+
+	; initialise LCD 
+
 	jsr krnl_init_lcd 
 
 	; now write hello world string
@@ -67,11 +77,11 @@ init:
 	;ACIA init code
 	
 	sta acia_stat ; soft reset
-	lda #$0B ; 1011 interrupts disabled and RTSB Low 
+	lda #$09
 	sta acia_comm
 
-	lda #$1F
-	sta acia_ctrl ; set baud rate to 19200 baud
+	lda #$1F ; full speed at 19200 baud 
+	sta acia_ctrl ;
 	clc
 
 ; send greeting string over serial 
@@ -169,7 +179,8 @@ augustiner: ; for now takes arguments in accumulator
 notcr:
 
 	cmp #ESC ; is it the escape key ? 
-	beq getline
+	beq getline  
+
 	iny
 	bpl getchar ; auto esc if line longer than 127 characters
 
@@ -187,11 +198,11 @@ escape:
 
 getchar:
 	jsr krnl_rx_serial ; wait for character
-	sta BUFFER,Y
+	sta line_buffer,Y
 	jsr krnl_send_chr_serial ; echo to serial
 	
 	cmp #CR
-	bne augustiner ; notcr
+	bne notcr
 
 	;falls through if CR since we have a line 
 
@@ -210,7 +221,7 @@ skip:
 	iny
 
 next_token:
-	lda BUFFER,Y
+	lda line_buffer,Y
 	cmp #" " ;  skip spaces 
 	beq skip
 	cmp #CR 
@@ -231,7 +242,7 @@ notrun:
 
 nexthex:
 
-	lda BUFFER,Y ; get next ascii byte
+	lda line_buffer,Y ; get next ascii byte
 	eor #$30 ; 0-9 : $30-$39 
 	cmp #10 ; check if within range 0-9
 	bcc parse ;ok we are done
@@ -240,7 +251,13 @@ nexthex:
 	adc #$88 ; map letter from "A"-"F" to $FA-FF
 	; we need the $F before the first digit since it will be shifted out 
 	cmp #$FA
-	bcc not_hex 
+	bcs parse 
+	; try to map "a" - "f" to $FA-$FF and check again 
+
+	adc #$20 ; $20 difference between A and a 
+	cmp #$FA
+	bcc not_hex
+	
 parse:
 
 	; shift nibble to MSD , since we want to use C bit thereafter 
@@ -350,7 +367,6 @@ load_serial:
 
 	ldx #0
 
-
 load_next_byte:
 	cpx L
 	bne not_done
@@ -362,14 +378,6 @@ not_done:
 	bmi acia_error
 	sta (XAML,X) ; store
 
-	pha
-	lda XAMH
-	jsr krnl_print_hex
-	lda XAML
-	jsr krnl_print_hex
-	lda #":"
-	jsr krnl_send_chr_serial
-	pla
 	jsr krnl_print_hex
 	lda #" "
 	jsr krnl_send_chr_serial
@@ -405,7 +413,7 @@ acia_error:
 ;***********************************************************
 
 
-krnl_print_hex: ; print the hex value that is in accumulator
+krnl_print_hex: ; print the hex value that is in the accumulator
 
 	pha
 	pha
@@ -463,7 +471,7 @@ krnl_convert_done:
 	rts
 
 krnl_send_string_serial: ; expects the string location to be null terminated and the location in the variable defined above 
-							; string is limited to 256 characters 
+							; string is limited to 127 characters 
 	pha
 	phy
 
@@ -482,8 +490,8 @@ cont_sending:
 string_sending_done:
 
 	
-	pla
 	ply
+	pla
 
 	rts
 
@@ -494,72 +502,33 @@ krnl_send_chr_serial: ; expects input argument in accumulator
 
 	rts
 
-	;******************************************************
+	;***************************************************************************************
 
-krnl_rx_serial: ; this routine waits for a byte to be received over serial
-
-	; set RTSB low 
-
-	lda #$0B
-	sta acia_comm
-	
-    lda acia_stat 
-
-	pha ; save acia_stat 
-
-	and #$04 ; test for overrun condition 
-	beq no_overrun
+krnl_rx_serial: ; this routine reads from the queue, and waits for the data if none is available 
 
 	phx
-	ldx #$ff
-	stx ACIA_ERROR ; flag overrun error
-	plx
+	ldx q_front
+wait:
+	cpx q_back ; check if back != front 
+	beq wait ; data is available in the queue
 
-	jmp restore
-
-no_overrun:
-
-	lda #0
-	sta ACIA_ERROR
-
-restore:
-
-	pla ; restore acia_stat
-	jmp first_entry
-
-recheck:
-
-	lda acia_stat
-
-first_entry: 
-	and #$08 ; check if character is there
-	beq recheck
+	lda serial_buffer,X
+	inx 					; increment front buffer and store back 
+	stx q_front
 	
-	lda acia_data ; just clear the receiver for now
-
-	pha
-
-	lda #$0A  ; set RTSB high so we avoid getting overrun
-	sta acia_comm
-
-	pla
-
+	plx
 	rts
-	;************************************************************************* 
+	;***********************************************************************************
 
 krnl_tx_byte_delay:
 
-    pha
     phx
-
 	ldx #$80 ; TODO: calculate exact value we need
 
 cnt:
 	dex
 	bne cnt
-
 	plx
-	pla
 
 	rts
 
@@ -596,9 +565,8 @@ krnl_init_lcd:
 	rts
 
 
-delay:	
+delay:	; used by lcd init 
 
-	pha
 	phx
 	phy
 
@@ -616,10 +584,19 @@ loop2:	dex
 
     ply
     plx
-    pla
 	
 	rts
 
+fast_delay: ; used for sending lcd characters pulse width >= 300ns 
+	pha
+
+	lda #200
+dec_more:
+	dec ; 2 cycles 
+	bne dec_more ; 3 cycles on average 
+
+	pla
+	rts
 
 krnl_send_lcd_instr:	
 	
@@ -628,7 +605,7 @@ krnl_send_lcd_instr:
 	stx porta
 	jsr delay
 	ldx #$00
-	stx porta	
+	stx porta 
 
 	rts
 
@@ -640,7 +617,7 @@ krnl_write_lcd_charac:
 	sta portb
 	ldx #$05 ; data - write - E = 1
 	stx porta
-	jsr delay
+	jsr fast_delay
 	ldx #$04 ; R/S still high
 	stx porta
 
@@ -648,6 +625,26 @@ krnl_write_lcd_charac:
     pla
 
 	rts
+
+acia_routine: ; reads into line_buffer stored at $300 goes upto $3ff 
+
+	pha
+	phx
+	ldx q_back
+	lda acia_stat ; just to clear
+	lda acia_data
+
+	; store the data in the circular queue
+	; store at back and increment back then pray for no buffer overflow 
+	; back points to an empty location
+
+	sta serial_buffer,X
+	inx  ; increment back pointer and store it back 
+	stx q_back
+
+	plx
+	pla
+	rti
 
 	.org $b000
 
@@ -663,6 +660,6 @@ acia_error_message: db "ACIA overrun!! exiting" , $A , $D , $00
 
 	.org $fffc ; 6502 reset vector
 	.word $8000
-	.word $0000 ; no interrupt
+	.word acia_routine ; no interrupt routine 
 
 
