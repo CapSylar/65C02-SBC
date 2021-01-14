@@ -523,13 +523,19 @@ wait:
 krnl_tx_byte_delay:
 
     phx
+	phy
+	ldy #10
+cnt1:	
 	ldx #$80 ; TODO: calculate exact value we need
-
 cnt:
 	dex
 	bne cnt
-	plx
 
+	dey
+	bne cnt1
+
+	ply
+	plx
 	rts
 
 krnl_init_lcd:
