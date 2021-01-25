@@ -6,15 +6,32 @@ The System consists of the a) the 65C02 along with its peripherals for general I
 
 Specifications: 65C02 running at 10Mhz,32KB of EEPROM, 16KB of RAM
 
+<img src="/pictures/shematic.png">
+
+<img src="/pictures/top_view.png">
+
 # Table of Contents
-1. [65C02 SBC](#65C02-SBC)
-    1. [Software/Monitor](#Software)
-       1. [Using the Monitor](#Using-the-Monitor)
-       2. [Examining Locations](#Examining-Locations)
-       3. [Writing into Memory](#Writing-into-Memory)
-       4. [Additional features](#Additional-features)
-       5. [Executing user programs](#Executing-user-programs)
-       6. [Uploading using serial mode](#Uploading-using-serial-mode)
+- [65C02 SBC  with Graphics](#65c02-sbc--with-graphics)
+- [Table of Contents](#table-of-contents)
+- [65C02 SBC](#65c02-sbc)
+  - [Software](#software)
+    - [Using the Monitor](#using-the-monitor)
+    - [Examining locations](#examining-locations)
+    - [Writing into memory](#writing-into-memory)
+    - [Additional features](#additional-features)
+    - [Executing user programs](#executing-user-programs)
+    - [Uploading using serial mode](#uploading-using-serial-mode)
+  - [Hardware](#hardware)
+    - [Components](#components)
+    - [CPU memory map](#cpu-memory-map)
+- [picoPPU](#picoppu)
+  - [Specifications](#specifications)
+  - [Memory Mapped registers](#memory-mapped-registers)
+    - [PPUCTRL/PPUSTATUS](#ppuctrlppustatus)
+    - [PPU_ADDRESS](#ppu_address)
+    - [PPU_DATA](#ppu_data)
+    - [OAM_ADDRESS](#oam_address)
+    - [OAM_DATA](#oam_data)
     
     2. [Hardware/Board](#Hardware)
        1. [Components](#Components)
@@ -151,11 +168,11 @@ Note that the address decoding has been done to greatly simplify the logic used 
 
 # picoPPU 
 
-picoPPU is the pixel processing unit attached to the SBC
+picoPPU is the pixel processing unit implemented on an FPGA attached to the SBC.
 
 ## Specifications 
 
-picoPPU supports up to 64 sprites on the screen at any given time with a limit of 8 sprites per scanline. The design of the unit was heavily inspired by the inner workings of the NES PPU and like the latter, it has both Primary and Secondary OAM ( Object Attribute Memory ) acting as sprite buffers. picoPPU has no background rendering at the moment
+picoPPU supports up to 64 sprites on the screen at any given time with a limit of 8 sprites per scanline. The design of the unit was heavily inspired by the inner workings of the NES PPU and like the latter, it has both Primary and Secondary OAM ( Object Attribute Memory ) acting as sprite buffers. picoPPU has no background rendering at the moment.
 
 ## Memory Mapped registers 
 
